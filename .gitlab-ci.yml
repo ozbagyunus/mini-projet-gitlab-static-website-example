@@ -1,0 +1,36 @@
+# Image utilisée par GitLab pour exécuter les jobs
+image: docker:24
+
+# Service Docker-in-Docker (permet de lancer Docker dans la CI)
+services:
+  - docker:24-dind
+
+# Variables nécessaires pour Docker-in-Docker
+variables:
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_TLS_CERTDIR: ""
+
+# Définition des stages (aligné avec ton schéma)
+stages:
+  - build
+  - test
+
+# Job 1 : Build de l'image Docker
+build_image:
+  stage: build
+  script:
+    - echo "Building Docker image..."
+    - docker build -t static-website-example:ci .
+    - docker images
+
+# Job 2 : Test du conteneur
+test_container:
+  stage: test
+  script:
+    - echo "Running container..."
+    - docker run -d -p 8080:80 --name static-web static-website-example:ci
+    - sleep 2
+    - echo "Testing HTTP response..."
+    - apk add --no-cache curl
+    - curl -I http://localhost:8080 | grep "200 OK"
+    - docker stop static-web
