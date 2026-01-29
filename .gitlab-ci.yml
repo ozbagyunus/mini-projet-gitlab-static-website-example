@@ -23,32 +23,53 @@ stages:
   - deploy_prod
   - test_prod
 
-# --- BUILD: build + save en artifact
+# -------------------------
+# BUILD
+# -------------------------
 docker-build:
   stage: build
   script:
-    - echo "Build image..."
+    - echo "Building Docker image..."
     - docker build -t static-website-example:ci .
-    - echo "Save image to artifact..."
+    - echo "Saving image as artifact..."
     - docker save static-website-example:ci > static-website-example.tar
+    - ls -lh static-website-example.tar
   artifacts:
     paths:
       - static-website-example.tar
     expire_in: 1 hour
 
-# --- TEST ACCEPTATION: load + run + curl
+# -------------------------
+# TEST ACCEPTATION (fix dind: pas de localhost)
+# -------------------------
 test acceptation:
   stage: test_acceptation
   script:
     - docker load < static-website-example.tar
-    - docker run -d -p 8080:80 --name webapp static-website-example:ci
+
+    # On lance le conteneur sans publier de port (pas nécessaire en CI dind)
+    - docker run -d --name webapp static-website-example:ci
     - sleep 2
+
+    # Debug utile si ça échoue
+    - docker ps -a
+    - docker logs webapp || true
+
+    # Curl depuis le job vers l'IP du conteneur
     - apk --no-cache add curl
-    - curl -fsS "http://localhost:8080" >/tmp/page.html
+    - CONTAINER_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' webapp)
+    - echo "Container IP: $CONTAINER_IP"
+    - curl -fsS "http://$CONTAINER_IP" >/tmp/page.html
     - grep -Ei "<html|<!doctype html" /tmp/page.html
+
+    # Nettoyage
     - docker rm -f webapp
 
-# --- RELEASE: tag + push vers GitLab registry
+# -------------------------
+# RELEASE IMAGE -> GitLab Container Registry
+# IMAGE_NAME vient de tes variables GitLab (Settings -> CI/CD -> Variables)
+# Exemple: registry.gitlab.com/.../mini-projet-gitlab-static-website-example
+# -------------------------
 release image:
   stage: release_image
   only:
@@ -56,15 +77,19 @@ release image:
   script:
     - docker load < static-website-example.tar
 
-    # Tag vers ton registry (IMAGE_NAME vient des variables GitLab)
+    # Tagging (comme ton bootcamp)
     - docker tag static-website-example:ci "${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}"
     - docker tag static-website-example:ci "${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA}"
 
+    # Login + push
     - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
     - docker push "${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}"
     - docker push "${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA}"
 
-# --- DEPLOY STAGING via SSH sur EC2 (ta variable HOSTNAME_DEPLOY_STAGING)
+# -------------------------
+# DEPLOY STAGING (SSH -> EC2)
+# Requis: SSH_USER, SSH_KEY, HOSTNAME_DEPLOY_STAGING
+# -------------------------
 deploy staging:
   stage: deploy_staging
   only:
@@ -80,6 +105,7 @@ deploy staging:
     - chmod 400 ~/.ssh/id_rsa
     - ssh-keyscan -t rsa ${HOSTNAME_DEPLOY_STAGING} >> ~/.ssh/known_hosts
 
+    # Sur la VM: login registry, pull, run nginx sur 80
     - |
       ssh -t ${SSH_USER}@${HOSTNAME_DEPLOY_STAGING} "
         docker login -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD} ${CI_REGISTRY} &&
@@ -88,7 +114,9 @@ deploy staging:
         docker run -d -p 80:80 --name webapp ${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}
       "
 
-# --- TEST STAGING
+# -------------------------
+# TEST STAGING
+# -------------------------
 test staging:
   image: alpine:3.20
   stage: test_staging
@@ -99,7 +127,10 @@ test staging:
     - curl -fsS "http://${HOSTNAME_DEPLOY_STAGING}" >/tmp/page.html
     - grep -Ei "<html|<!doctype html" /tmp/page.html
 
-# --- DEPLOY PROD via SSH sur EC2
+# -------------------------
+# DEPLOY PROD (SSH -> EC2)
+# Requis: SSH_USER, SSH_KEY, HOSTNAME_DEPLOY_PROD
+# -------------------------
 deploy prod:
   stage: deploy_prod
   only:
@@ -123,7 +154,9 @@ deploy prod:
         docker run -d -p 80:80 --name webapp ${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}
       "
 
-# --- TEST PROD
+# -------------------------
+# TEST PROD
+# -------------------------
 test prod:
   image: alpine:3.20
   stage: test_prod
