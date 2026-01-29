@@ -90,20 +90,20 @@ test_acceptation:
   script:
     - |
       set -e
-    # Charger l'image depuis l'artifact
+      # Charger l'image depuis l'artifact
       docker load < static-website-example.tar
 
-    # Créer un réseau docker dédié au test
+      # Créer un réseau docker dédié au test
       docker network create ci-net >/dev/null 2>&1 || true
 
-    # Lancer le conteneur à tester (dans le réseau ci-net)
+      # Lancer le conteneur à tester (dans le réseau ci-net)
       docker run -d --name webapp --network ci-net static-website-example:ci
       sleep 2
 
-    # Test HTTP depuis un conteneur curl dans le même réseau
+      # Test HTTP depuis un conteneur curl dans le même réseau
       docker run --rm --network ci-net curlimages/curl:8.7.1 -fsS http://webapp/ | grep -Ei "<html|<!doctype html"
 
-    # Nettoyage
+      # Nettoyage
       docker rm -f webapp
       docker network rm ci-net >/dev/null 2>&1 || true
 
