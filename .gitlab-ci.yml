@@ -6,6 +6,7 @@ variables:
   STORAGE: 100
 
 image: docker:24
+
 services:
   - name: docker:24-dind
     alias: docker
@@ -23,10 +24,7 @@ stages:
   - deploy_prod
   - test_prod
 
-# -------------------------
-# BUILD
-# -------------------------
-docker-build:
+docker_build:
   stage: build
   script:
     - echo "Building Docker image..."
@@ -39,58 +37,34 @@ docker-build:
       - static-website-example.tar
     expire_in: 1 hour
 
-# -------------------------
-# TEST ACCEPTATION (fix dind: pas de localhost)
-# -------------------------
-test acceptation:
+test_acceptation:
   stage: test_acceptation
   script:
     - docker load < static-website-example.tar
-
-    # On lance le conteneur sans publier de port (pas nécessaire en CI dind)
     - docker run -d --name webapp static-website-example:ci
     - sleep 2
-
-    # Debug utile si ça échoue
     - docker ps -a
     - docker logs webapp || true
-
-    # Curl depuis le job vers l'IP du conteneur
     - apk --no-cache add curl
     - CONTAINER_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' webapp)
     - echo "Container IP: $CONTAINER_IP"
     - curl -fsS "http://$CONTAINER_IP" >/tmp/page.html
     - grep -Ei "<html|<!doctype html" /tmp/page.html
-
-    # Nettoyage
     - docker rm -f webapp
 
-# -------------------------
-# RELEASE IMAGE -> GitLab Container Registry
-# IMAGE_NAME vient de tes variables GitLab (Settings -> CI/CD -> Variables)
-# Exemple: registry.gitlab.com/.../mini-projet-gitlab-static-website-example
-# -------------------------
-release image:
+release_image:
   stage: release_image
   only:
     - master
   script:
     - docker load < static-website-example.tar
-
-    # Tagging (comme ton bootcamp)
     - docker tag static-website-example:ci "${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}"
     - docker tag static-website-example:ci "${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA}"
-
-    # Login + push
     - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
     - docker push "${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}"
     - docker push "${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA}"
 
-# -------------------------
-# DEPLOY STAGING (SSH -> EC2)
-# Requis: SSH_USER, SSH_KEY, HOSTNAME_DEPLOY_STAGING
-# -------------------------
-deploy staging:
+deploy_staging:
   stage: deploy_staging
   only:
     - master
@@ -104,8 +78,6 @@ deploy staging:
     - echo "${SSH_KEY}" > ~/.ssh/id_rsa
     - chmod 400 ~/.ssh/id_rsa
     - ssh-keyscan -t rsa ${HOSTNAME_DEPLOY_STAGING} >> ~/.ssh/known_hosts
-
-    # Sur la VM: login registry, pull, run nginx sur 80
     - |
       ssh -t ${SSH_USER}@${HOSTNAME_DEPLOY_STAGING} "
         docker login -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD} ${CI_REGISTRY} &&
@@ -114,10 +86,7 @@ deploy staging:
         docker run -d -p 80:80 --name webapp ${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}
       "
 
-# -------------------------
-# TEST STAGING
-# -------------------------
-test staging:
+test_staging:
   image: alpine:3.20
   stage: test_staging
   only:
@@ -127,11 +96,7 @@ test staging:
     - curl -fsS "http://${HOSTNAME_DEPLOY_STAGING}" >/tmp/page.html
     - grep -Ei "<html|<!doctype html" /tmp/page.html
 
-# -------------------------
-# DEPLOY PROD (SSH -> EC2)
-# Requis: SSH_USER, SSH_KEY, HOSTNAME_DEPLOY_PROD
-# -------------------------
-deploy prod:
+deploy_prod:
   stage: deploy_prod
   only:
     - master
@@ -145,7 +110,6 @@ deploy prod:
     - echo "${SSH_KEY}" > ~/.ssh/id_rsa
     - chmod 400 ~/.ssh/id_rsa
     - ssh-keyscan -t rsa ${HOSTNAME_DEPLOY_PROD} >> ~/.ssh/known_hosts
-
     - |
       ssh -t ${SSH_USER}@${HOSTNAME_DEPLOY_PROD} "
         docker login -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD} ${CI_REGISTRY} &&
@@ -154,10 +118,7 @@ deploy prod:
         docker run -d -p 80:80 --name webapp ${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}
       "
 
-# -------------------------
-# TEST PROD
-# -------------------------
-test prod:
+test_prod:
   image: alpine:3.20
   stage: test_prod
   only:
