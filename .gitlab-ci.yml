@@ -123,19 +123,19 @@ release_image:
   script:
     - |
       set -e
-    # Charger l'image depuis l'artifact
+      # Charger l'image depuis l'artifact
       docker load < static-website-example.tar
 
-    # Tagging :
-    #    - CI_COMMIT_REF_SLUG = nom de branche "compatible"
-    #    - CI_COMMIT_SHORT_SHA = tag immuable (lié au commit)
+      # Tagging :
+      #    - CI_COMMIT_REF_SLUG = nom de branche "compatible"
+      #    - CI_COMMIT_SHORT_SHA = tag immuable (lié au commit)
       docker tag static-website-example:ci "${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}"
       docker tag static-website-example:ci "${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA}"
 
-    # Login au registry GitLab (credentials fournis par GitLab)
+      # Login au registry GitLab (credentials fournis par GitLab)
       docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
 
-    # Push des deux tags
+      # Push des deux tags
       docker push "${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}"
       docker push "${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA}"
 
