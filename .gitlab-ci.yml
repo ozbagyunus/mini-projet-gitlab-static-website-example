@@ -43,24 +43,31 @@ test_acceptation:
     - |
       set -e
 
+      echo "Load image..."
       docker load < static-website-example.tar
 
-      docker run -d --name webapp static-website-example:ci
+      echo "Create docker network for tests..."
+      docker network create ci-net >/dev/null 2>&1 || true
+
+      echo "Run webapp container on ci-net..."
+      docker run -d --name webapp --network ci-net static-website-example:ci
       sleep 2
 
+      echo "Debug webapp..."
       docker ps -a
       docker logs webapp || true
 
-      apk --no-cache add curl
+      echo "HTTP test from a curl container in same network..."
+      docker run --rm --network ci-net curlimages/curl:8.7.1 -fsS http://webapp/ >/tmp/page.html || exit 1
 
-      # IP du conteneur (format simple, évite les {{range ...}} complexes)
-      CONTAINER_IP="$(docker inspect webapp --format='{{.NetworkSettings.IPAddress}}')"
-      echo "Container IP: ${CONTAINER_IP}"
+      echo "Basic HTML check..."
+      # on récupère la page via curl container et on grep côté job via docker logs? -> plus simple: re-curl et grep
+      docker run --rm --network ci-net curlimages/curl:8.7.1 -fsS http://webapp/ | grep -Ei "<html|<!doctype html"
 
-      curl -fsS "http://${CONTAINER_IP}" > /tmp/page.html
-      grep -Ei "<html|<!doctype html" /tmp/page.html
-
+      echo "Cleanup..."
       docker rm -f webapp
+      docker network rm ci-net >/dev/null 2>&1 || true
+
 
 release_image:
   stage: release_image
