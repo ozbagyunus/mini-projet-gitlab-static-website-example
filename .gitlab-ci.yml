@@ -1,40 +1,20 @@
-# ============================================================
-#  GITLAB CI/CD - MINI PROJET DEVOPS
-# ============================================================
-# Objectif global du pipeline :
-#   1) Build : construire une image Docker contenant un site statique
-#   2) Test acceptation : vérifier que l’image répond bien en HTTP
-#   3) Release : pousser l’image dans le GitLab Container Registry
-#   4) Déploiement :
-#        - Review App (Merge Request) : création automatique d'une EC2 + déploiement
-#        - Staging (master) : déploiement sur une EC2 déjà existante
-#        - Prod (master) : déploiement sur une EC2 déjà existante
-#
-# Contrainte importante :
-#   - Le build (docker_build) produit un artifact .tar qui est utilisé
-#     par test_acceptation et release_image
-#   - Les Review Apps utilisent AWS (aws-cli) pour créer/supprimer une EC2
-
-# -------------------------
 # VARIABLES GLOBALES
-# -------------------------
 variables:
-  # --- AWS (utilisé UNIQUEMENT pour les review apps) ---
   # AMI Ubuntu à utiliser pour créer l'EC2 "review"
   AMI_ID: "ami-073130f74f5ffb161"
-  # Nom de la KeyPair EC2 (doit exister dans AWS)
+  # Nom de la KeyPair EC2 présent sur AWS
   KEY_NAME: "deploy"
-  # Security Group EC2 (doit autoriser SSH 22 + HTTP 80)
+  # Security Group EC2
   SECURITY_GROUP: "sg-0b16f68678d01775c"
   # Type d'instance EC2
   INSTANCE_TYPE: "t3.micro"
   # Taille du disque de l'EC2
   STORAGE: 100
 
-  # --- Docker-in-Docker (permet de lancer docker dans le job CI) ---
+  # Docker-in-Docker (permet de lancer docker dans le job CI)
   # Le client Docker de l'image docker:24 parle au daemon docker:dind via TCP
   DOCKER_HOST: tcp://docker:2375
-  # Pas de TLS entre le client docker et dind (configuration classique CI)
+  # Pas de TLS entre le client docker et dind apparement c'est une configuration classique CI
   DOCKER_TLS_CERTDIR: ""
 
 # Image par défaut (utile pour build/test/push Docker)
@@ -45,9 +25,7 @@ services:
   - name: docker:24-dind
     alias: docker
 
-# -------------------------
 # STAGES (ordre d'exécution)
-# -------------------------
 stages:
   - build
   - test_acceptation
@@ -59,10 +37,8 @@ stages:
   - deploy_prod
   - test_prod
 
-# -------------------------
+
 # TEMPLATE DE TEST HTTP
-# -------------------------
-# But : éviter de dupliquer le même test pour staging et prod.
 # Ce test :
 #   - installe curl
 #   - fait un curl sur l'URL
@@ -75,25 +51,20 @@ stages:
     - apk --no-cache add curl
     # On télécharge la page dans /tmp/page.html
     - curl -fsS "http://$DOMAIN" >/tmp/page.html
-    # On vérifie qu'il y a au moins une balise HTML (test très simple)
+    # On vérifie qu'il y a au moins une balise HTML
     - grep -Ei "<html|<!doctype html" /tmp/page.html
 
-# ============================================================
 # 1) BUILD : construire l'image Docker
-# ============================================================
 docker_build:
   stage: build
-  # On build sur master + sur merge_requests
-  # Pourquoi MR ? Parce qu'on veut aussi pouvoir déployer une review app,
-  # donc il faut une image disponible dans le registry.
   only:
     - master
     - merge_requests
   script:
-    # 1) Construire l'image Docker (tag local "ci")
+    # Construire l'image Docker
     - docker build -t static-website-example:ci .
-    # 2) Sauvegarder l'image dans un fichier .tar
-    #    => permet de la réutiliser dans les jobs suivants sans rebuild
+    # Sauvegarder l'image dans un fichier .tar
+    # => permet de la réutiliser dans les jobs suivants sans rebuild
     - docker save static-website-example:ci > static-website-example.tar
   artifacts:
     # Artifact = fichier partagé entre jobs GitLab
@@ -101,16 +72,14 @@ docker_build:
       - static-website-example.tar
     expire_in: 1 hour
 
-# ============================================================
+
 # 2) TEST ACCEPTATION : vérifier que l'image marche (HTTP OK)
-# ============================================================
 test_acceptation:
   stage: test_acceptation
   only:
     - master
     - merge_requests
 
-  # IMPORTANT :
   # "needs" sert à 2 choses :
   #   - dire à GitLab que ce job dépend de docker_build
   #   - récupérer l'artifact static-website-example.tar (sinon il peut manquer)
@@ -121,27 +90,25 @@ test_acceptation:
   script:
     - |
       set -e
-      # 1) Charger l'image depuis l'artifact
+    # Charger l'image depuis l'artifact
       docker load < static-website-example.tar
 
-      # 2) Créer un réseau docker dédié au test (évite les conflits)
+    # Créer un réseau docker dédié au test
       docker network create ci-net >/dev/null 2>&1 || true
 
-      # 3) Lancer le conteneur à tester (dans le réseau ci-net)
+    # Lancer le conteneur à tester (dans le réseau ci-net)
       docker run -d --name webapp --network ci-net static-website-example:ci
       sleep 2
 
-      # 4) Test HTTP depuis un conteneur curl dans le même réseau
-      #    => on évite le mapping de ports
+    # Test HTTP depuis un conteneur curl dans le même réseau
       docker run --rm --network ci-net curlimages/curl:8.7.1 -fsS http://webapp/ | grep -Ei "<html|<!doctype html"
 
-      # 5) Nettoyage (toujours important en CI)
+    # Nettoyage
       docker rm -f webapp
       docker network rm ci-net >/dev/null 2>&1 || true
 
-# ============================================================
+
 # 3) RELEASE : pousser l'image dans GitLab Container Registry
-# ============================================================
 release_image:
   stage: release_image
   only:
@@ -156,25 +123,24 @@ release_image:
   script:
     - |
       set -e
-      # 1) Charger l'image depuis l'artifact
+    # Charger l'image depuis l'artifact
       docker load < static-website-example.tar
 
-      # 2) Tagging :
-      #    - CI_COMMIT_REF_SLUG = nom de branche "compatible"
-      #    - CI_COMMIT_SHORT_SHA = tag immuable (lié au commit)
+    # Tagging :
+    #    - CI_COMMIT_REF_SLUG = nom de branche "compatible"
+    #    - CI_COMMIT_SHORT_SHA = tag immuable (lié au commit)
       docker tag static-website-example:ci "${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}"
       docker tag static-website-example:ci "${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA}"
 
-      # 3) Login au registry GitLab (credentials fournis par GitLab)
+    # Login au registry GitLab (credentials fournis par GitLab)
       docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
 
-      # 4) Push des deux tags
+    # Push des deux tags
       docker push "${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}"
       docker push "${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA}"
 
-# ============================================================
+
 # 4) DEPLOY REVIEW (Merge Request) : création EC2 + déploiement
-# ============================================================
 # Idée générale :
 #   - Quand on ouvre une Merge Request, GitLab exécute ce job.
 #   - Ce job crée une EC2 dédiée à la branche (si elle n'existe pas déjà).
@@ -203,44 +169,29 @@ deploy_review:
   script:
     - set -e
 
-    # --------------------------------------------------------
-    # A) Préparer les outils nécessaires dans le job
-    # --------------------------------------------------------
-    # Pourquoi aws-cli ?
-    #   -> pour créer/chercher/terminer l'EC2 (via l'API AWS)
-    #
-    # Pourquoi openssh-client ?
-    #   -> pour se connecter à l'EC2 et exécuter des commandes docker à distance
+
+    # Préparer les outils nécessaires dans le job
+    # aws-cli pour créer/chercher/terminer l'EC2
+    # openssh-client pour se connecter à l'EC2 et exécuter des commandes docker à distance
     - apk add --no-cache aws-cli openssh-client
 
-    # --------------------------------------------------------
-    # B) Configuration AWS
-    # --------------------------------------------------------
+    # Configuration AWS
     # Ici on configure aws-cli en utilisant les variables GitLab :
-    #   AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_DEFAULT_REGION
+    # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_DEFAULT_REGION
     # Ces variables sont à définir dans GitLab CI/CD Settings > Variables
     - aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
     - aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
     - aws configure set region "$AWS_DEFAULT_REGION"
 
-    # --------------------------------------------------------
-    # C) Définir un "tag" unique pour identifier l'EC2
-    # --------------------------------------------------------
+    # Définir un "tag" unique pour identifier l'EC2
     # Exemple :
     #   branche = feature-login
     #   tag Name = review-feature-login
-    #
-    # Avantage :
-    #   - si le job relance, il peut retrouver l'EC2 au lieu d'en recréer une nouvelle
+    #   si le job se relance, il peut retrouver l'EC2 au lieu d'en recréer une nouvelle
     - export TAG="review-$CI_COMMIT_REF_SLUG"
 
-    # --------------------------------------------------------
-    # D) Étape 1 : vérifier si l'EC2 existe déjà
-    # --------------------------------------------------------
-    # aws ec2 describe-instances :
-    #   - filtre par le tag Name=$TAG
-    #   - filtre aussi par état de l'instance (running/stopped etc.)
-    #
+
+    # Étape 1 : vérifier si l'EC2 existe déjà
     # On récupère l'InstanceId si trouvée
     - |
       INSTANCE_ID=$(aws ec2 describe-instances \
@@ -250,19 +201,15 @@ deploy_review:
 
       # Si INSTANCE_ID n'est pas vide, alors l'instance existe déjà
       if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
-        echo "✅ Instance review déjà existante : $INSTANCE_ID"
+        echo "Instance review déjà existante : $INSTANCE_ID"
       else
-        echo "🆕 Aucune instance trouvée, création d'une EC2 : $TAG"
+        echo "Aucune instance trouvée, création d'une EC2 : $TAG"
 
-        # ----------------------------------------------------
         # E) User Data : script exécuté automatiquement au boot
-        # ----------------------------------------------------
         # Ce script s'exécute quand l'EC2 démarre.
         # Ici il sert à :
         #   - installer Docker
         #   - ajouter l'utilisateur ubuntu au groupe docker
-        #
-        # Pourquoi ?
         #   -> pour pouvoir ensuite faire "docker pull / docker run" via SSH
         USER_DATA="#!/bin/bash
         curl -fsSL https://get.docker.com -o install-docker.sh
@@ -271,9 +218,7 @@ deploy_review:
         sudo usermod -aG docker ubuntu
         "
 
-        # ----------------------------------------------------
         # F) Création de l'EC2
-        # ----------------------------------------------------
         # On utilise :
         #   - AMI_ID / INSTANCE_TYPE / KEY_NAME / SECURITY_GROUP / STORAGE
         # Et on tag l'instance avec Name=$TAG
@@ -287,9 +232,8 @@ deploy_review:
           --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$TAG}]" \
           --user-data "$USER_DATA"
 
-        # ----------------------------------------------------
+
         # G) Attente simple
-        # ----------------------------------------------------
         # On attend que l'EC2 ait le temps :
         #   - de démarrer
         #   - d'obtenir une IP publique
@@ -297,9 +241,8 @@ deploy_review:
         sleep 60
       fi
 
-    # --------------------------------------------------------
+
     # H) Étape 2 : récupérer l'IP publique de l'EC2
-    # --------------------------------------------------------
     # On re-fait un describe-instances mais cette fois on récupère PublicIpAddress
     - |
       PUBLIC_IP=$(aws ec2 describe-instances \
@@ -309,17 +252,16 @@ deploy_review:
 
       # Si pas d'IP => on arrête le job
       if [ -z "$PUBLIC_IP" ] || [ "$PUBLIC_IP" = "None" ]; then
-        echo "❌ IP publique introuvable (l'instance n'est peut-être pas prête)."
+        echo "IP publique introuvable (l'instance n'est peut-être pas prête)."
         exit 1
       fi
 
       # On stocke l'IP dans une variable pour la suite
       export HOSTNAME_DEPLOY_REVIEW="$PUBLIC_IP"
-      echo "🌍 IP review : $HOSTNAME_DEPLOY_REVIEW"
+      echo "IP review : $HOSTNAME_DEPLOY_REVIEW"
 
-    # --------------------------------------------------------
+
     # I) Étape 3 : préparer la connexion SSH vers l'EC2
-    # --------------------------------------------------------
     # On met la clé privée SSH (SSH_KEY) dans ~/.ssh/id_rsa
     # Puis on ajoute la clé de l'host dans known_hosts (évite le prompt interactif)
     - mkdir -p ~/.ssh
@@ -328,9 +270,7 @@ deploy_review:
     - chmod 400 ~/.ssh/id_rsa
     - ssh-keyscan -t rsa "${HOSTNAME_DEPLOY_REVIEW}" >> ~/.ssh/known_hosts
 
-    # --------------------------------------------------------
     # J) Étape 4 : déployer le conteneur Docker sur l'EC2 via SSH
-    # --------------------------------------------------------
     # On exécute plusieurs commandes sur la VM :
     #   1) docker login au registry GitLab
     #   2) docker pull de l'image correspondant à la branche
@@ -344,9 +284,8 @@ deploy_review:
         docker run -d --restart unless-stopped -p 80:80 --name webapp ${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}
       "
 
-    # --------------------------------------------------------
+
     # K) Étape 5 : donner l'URL à GitLab pour afficher la Review App
-    # --------------------------------------------------------
     # On écrit une variable dans deploy.env.
     # GitLab la lit grâce à "artifacts:reports:dotenv"
     # => GitLab sait alors que l'URL de l'environnement est :
@@ -359,12 +298,9 @@ deploy_review:
     reports:
       dotenv: deploy.env
 
-# ============================================================
+
 # 5) STOP REVIEW : job manuel pour supprimer l'EC2 review
-# ============================================================
-# But :
 #   - Quand on clique "Stop environment" dans GitLab,
-#     ce job est déclenché.
 #   - Il retrouve l'instance EC2 via le même tag Name=review-<branche>
 #   - Puis la termine (terminate-instances)
 stop_review:
@@ -377,7 +313,7 @@ stop_review:
     name: review/$CI_COMMIT_REF_SLUG
     # Indique à GitLab : ce job STOP l'environnement
     action: stop
-  # Manuel : on choisit quand supprimer l'EC2 (important pour tester)
+  # Manuel : on choisit quand supprimer l'EC2 (pour pouvoir tester)
   when: manual
   script:
     - set -e
@@ -390,7 +326,7 @@ stop_review:
 
     # Tag de l'instance à supprimer
     - export TAG="review-$CI_COMMIT_REF_SLUG"
-    # Nouveau tag (optionnel) juste pour "tracer" la suppression
+    # Nouveau tag juste pour "tracer" la suppression
     - export NEW_TAG="destroyed-$CI_COMMIT_REF_SLUG"
 
     # On retrouve l'instance par tag
@@ -401,7 +337,7 @@ stop_review:
         --output text)
 
       if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
-        echo "🗑️ Suppression instance : $INSTANCE_ID"
+        echo "Suppression instance : $INSTANCE_ID"
 
         # On change le tag Name pour garder une trace
         aws ec2 create-tags --resources "$INSTANCE_ID" --tags Key=Name,Value="$NEW_TAG"
@@ -409,12 +345,11 @@ stop_review:
         # Terminate : supprime l'instance EC2
         aws ec2 terminate-instances --instance-ids "$INSTANCE_ID"
       else
-        echo "ℹ️ Aucune instance review à supprimer."
+        echo "ℹAucune instance review à supprimer."
       fi
 
-# ============================================================
+
 # 6) DEPLOY STAGING : déploiement sur EC2 existante
-# ============================================================
 deploy_staging:
   stage: deploy_staging
   only:
@@ -442,16 +377,14 @@ deploy_staging:
         docker run -d -p 80:80 --name webapp ${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}
       "
 
-# Test staging (réutilise le template)
+# Test staging (on réutilise le template)
 test_staging:
   <<: *http_test
   stage: test_staging
   variables:
     DOMAIN: ${HOSTNAME_DEPLOY_STAGING}
 
-# ============================================================
 # 7) DEPLOY PROD : déploiement sur EC2 existante
-# ============================================================
 deploy_prod:
   stage: deploy_prod
   only:
@@ -479,7 +412,7 @@ deploy_prod:
         docker run -d -p 80:80 --name webapp ${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}
       "
 
-# Test prod (réutilise le template)
+# Test prod (on réutilise le template)
 test_prod:
   <<: *http_test
   stage: test_prod
