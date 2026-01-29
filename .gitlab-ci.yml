@@ -52,6 +52,9 @@ docker_build:
 # -------------------------
 test_acceptation:
   stage: test_acceptation
+  needs:
+    - job: docker_build
+      artifacts: true
   script:
     - |
       set -e
@@ -79,6 +82,9 @@ release_image:
   only:
     - master
     - merge_requests
+  needs:
+    - job: docker_build
+      artifacts: true
   script:
     - |
       set -e
