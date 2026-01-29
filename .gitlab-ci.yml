@@ -5,7 +5,7 @@ variables:
   INSTANCE_TYPE: "t3.micro"
   STORAGE: 100
 
- image: docker:24
+image: docker:24
 services:
   - name: docker:24-dind
     alias: docker
