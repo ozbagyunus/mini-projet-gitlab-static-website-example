@@ -55,6 +55,9 @@ docker_build:
 # -------------------------
 test_acceptation:
   stage: test_acceptation
+  only:
+    - master
+    - merge_requests
   script:
     - |
       set -e
