@@ -17,86 +17,232 @@ variables:
 
 stages:
   - build
-  - test_acceptation
-  - release_image
-  - deploy_staging
-  - test_staging
-  - deploy_prod
-  - test_prod
+  - Test acceptation
+  - Release image
+  - Deploy review
+  - Stop review
+  - Deploy staging
+  - Test staging
+  - Deploy prod
+  - Test prod
 
+# -------------------------
+# BUILD
+# -------------------------
 docker_build:
   stage: build
   script:
-    - echo "Building Docker image..."
     - docker build -t static-website-example:ci .
-    - echo "Saving image as artifact..."
     - docker save static-website-example:ci > static-website-example.tar
-    - ls -lh static-website-example.tar
   artifacts:
     paths:
       - static-website-example.tar
     expire_in: 1 hour
 
+# -------------------------
+# TEST ACCEPTATION (robuste en dind)
+# -------------------------
 test_acceptation:
-  stage: test_acceptation
+  stage: Test acceptation
+  script:
+    - |
+      set -e
+      docker load < static-website-example.tar
+
+      docker network create ci-net >/dev/null 2>&1 || true
+      docker run -d --name webapp --network ci-net static-website-example:ci
+      sleep 2
+
+      docker ps -a
+      docker logs webapp || true
+
+      # Test HTTP depuis un conteneur curl dans le même réseau
+      docker run --rm --network ci-net curlimages/curl:8.7.1 -fsS http://webapp/ | grep -Ei "<html|<!doctype html"
+
+      docker rm -f webapp
+      docker network rm ci-net >/dev/null 2>&1 || true
+
+# -------------------------
+# RELEASE IMAGE -> GitLab Registry
+# IMAGE_NAME vient de tes variables GitLab
+# -------------------------
+release_image:
+  stage: Release image
+  only:
+    - master
+  script:
+    - |
+      set -e
+      docker load < static-website-example.tar
+
+      docker tag static-website-example:ci "${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}"
+      docker tag static-website-example:ci "${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA}"
+
+      docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+      docker push "${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}"
+      docker push "${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA}"
+
+# -------------------------
+# DEPLOY REVIEW (Merge Requests)
+# Crée une EC2 taguée review-<branch> si elle n’existe pas, récupère son IP, déploie le conteneur
+# Expose l'URL via dotenv artifact REVIEW_ENVIRONMENT_URL
+# -------------------------
+deploy_review:
+  stage: Deploy review
+  only:
+    - merge_requests
+  environment:
+    name: review/$CI_COMMIT_REF_SLUG
+    url: $REVIEW_ENVIRONMENT_URL
+    on_stop: stop_review
+  script:
+    - |
+      set -e
+      INIT_PATH="$(pwd)"
+
+      apk add --no-cache python3 py3-pip openssh-client
+      python3 -m venv venv
+      . venv/bin/activate
+      pip install awscli
+
+      aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
+      aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
+      aws configure set region "$AWS_DEFAULT_REGION"
+
+      BRANCH_NAME="$CI_COMMIT_REF_SLUG"
+      TAG="review-$BRANCH_NAME"
+
+      # Cherche une instance existante
+      INSTANCE_ID="$(aws ec2 describe-instances \
+        --filters "Name=tag:Name,Values=$TAG" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+        --query "Reservations[*].Instances[*].InstanceId" \
+        --output text)"
+
+      if [ -z "$INSTANCE_ID" ]; then
+        echo "No instance found for $TAG, creating one..."
+
+        # User-data pour installer Docker
+        USER_DATA="#!/bin/bash
+        curl -fsSL https://get.docker.com -o install-docker.sh
+        sh install-docker.sh --dry-run
+        sudo sh install-docker.sh
+        sudo usermod -aG docker ubuntu
+        "
+
+        aws ec2 run-instances \
+          --image-id "$AMI_ID" \
+          --count 1 \
+          --instance-type "$INSTANCE_TYPE" \
+          --key-name "$KEY_NAME" \
+          --security-group-ids "$SECURITY_GROUP" \
+          --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=$STORAGE}" \
+          --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$TAG}]" \
+          --user-data "$USER_DATA" >/dev/null
+
+        # Attendre que l'IP publique apparaisse
+        sleep 30
+      else
+        echo "Found instance $INSTANCE_ID for $TAG"
+      fi
+
+      # Récupère l'IP publique
+      PUBLIC_IP="$(aws ec2 describe-instances \
+        --filters "Name=tag:Name,Values=$TAG" "Name=instance-state-name,Values=pending,running" \
+        --query "Reservations[*].Instances[*].PublicIpAddress" \
+        --output text)"
+
+      if [ -z "$PUBLIC_IP" ] || [ "$PUBLIC_IP" = "None" ]; then
+        echo "No public IP found for $TAG (instance may still be starting)."
+        exit 1
+      fi
+
+      HOSTNAME_DEPLOY_REVIEW="$PUBLIC_IP"
+      echo "Review IP: $HOSTNAME_DEPLOY_REVIEW"
+
+      # Setup SSH
+      mkdir -p ~/.ssh
+      chmod 700 ~/.ssh
+      echo "${SSH_KEY}" > ~/.ssh/id_rsa
+      chmod 400 ~/.ssh/id_rsa
+      ssh-keyscan -t rsa "$HOSTNAME_DEPLOY_REVIEW" >> ~/.ssh/known_hosts
+
+      # Déployer sur l'EC2 review
+      ssh -t "${SSH_USER}@${HOSTNAME_DEPLOY_REVIEW}" "
+        docker login -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD} ${CI_REGISTRY} &&
+        docker pull ${IMAGE_NAME}:${CI_COMMIT_REF_SLUG} &&
+        docker rm -f webapp || true &&
+        docker run -d -p 80:80 --name webapp ${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}
+      "
+
+      cd "$INIT_PATH"
+      echo "REVIEW_ENVIRONMENT_URL=http://${HOSTNAME_DEPLOY_REVIEW}" >> deploy.env
+  artifacts:
+    reports:
+      dotenv: deploy.env
+
+# -------------------------
+# STOP REVIEW (manual)
+# Termine l’EC2 taguée review-<branch>
+# -------------------------
+stop_review:
+  stage: Stop review
+  only:
+    - merge_requests
+  environment:
+    name: review/$CI_COMMIT_REF_SLUG
+    action: stop
+  when: manual
   script:
     - |
       set -e
 
-      echo "Load image..."
-      docker load < static-website-example.tar
+      apk add --no-cache python3 py3-pip
+      python3 -m venv venv
+      . venv/bin/activate
+      pip install awscli
 
-      echo "Create docker network for tests..."
-      docker network create ci-net >/dev/null 2>&1 || true
+      aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
+      aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
+      aws configure set region "$AWS_DEFAULT_REGION"
 
-      echo "Run webapp container on ci-net..."
-      docker run -d --name webapp --network ci-net static-website-example:ci
-      sleep 2
+      BRANCH_NAME="$CI_COMMIT_REF_SLUG"
+      TAG="review-$BRANCH_NAME"
 
-      echo "Debug webapp..."
-      docker ps -a
-      docker logs webapp || true
+      INSTANCE_ID="$(aws ec2 describe-instances \
+        --filters "Name=tag:Name,Values=$TAG" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+        --query "Reservations[*].Instances[*].InstanceId" \
+        --output text)"
 
-      echo "HTTP test from a curl container in same network..."
-      docker run --rm --network ci-net curlimages/curl:8.7.1 -fsS http://webapp/ >/tmp/page.html || exit 1
+      if [ -n "$INSTANCE_ID" ]; then
+        echo "Terminating instance $INSTANCE_ID for $TAG"
+        aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" >/dev/null
+        echo "Termination requested."
+      else
+        echo "No instance found for $TAG"
+      fi
 
-      echo "Basic HTML check..."
-      # on récupère la page via curl container et on grep côté job via docker logs? -> plus simple: re-curl et grep
-      docker run --rm --network ci-net curlimages/curl:8.7.1 -fsS http://webapp/ | grep -Ei "<html|<!doctype html"
-
-      echo "Cleanup..."
-      docker rm -f webapp
-      docker network rm ci-net >/dev/null 2>&1 || true
-
-
-release_image:
-  stage: release_image
-  only:
-    - master
-  script:
-    - docker load < static-website-example.tar
-    - docker tag static-website-example:ci "${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}"
-    - docker tag static-website-example:ci "${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA}"
-    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    - docker push "${IMAGE_NAME}:${CI_COMMIT_REF_SLUG}"
-    - docker push "${IMAGE_NAME}:${CI_COMMIT_SHORT_SHA}"
-
+# -------------------------
+# DEPLOY STAGING
+# -------------------------
 deploy_staging:
-  stage: deploy_staging
+  stage: Deploy staging
   only:
     - master
   environment:
     name: staging
     url: http://${HOSTNAME_DEPLOY_STAGING}
   script:
-    - apk add --no-cache openssh-client
-    - mkdir -p ~/.ssh
-    - chmod 700 ~/.ssh
-    - echo "${SSH_KEY}" > ~/.ssh/id_rsa
-    - chmod 400 ~/.ssh/id_rsa
-    - ssh-keyscan -t rsa ${HOSTNAME_DEPLOY_STAGING} >> ~/.ssh/known_hosts
     - |
-      ssh -t ${SSH_USER}@${HOSTNAME_DEPLOY_STAGING} "
+      set -e
+      apk add --no-cache openssh-client
+
+      mkdir -p ~/.ssh
+      chmod 700 ~/.ssh
+      echo "${SSH_KEY}" > ~/.ssh/id_rsa
+      chmod 400 ~/.ssh/id_rsa
+      ssh-keyscan -t rsa "${HOSTNAME_DEPLOY_STAGING}" >> ~/.ssh/known_hosts
+
+      ssh -t "${SSH_USER}@${HOSTNAME_DEPLOY_STAGING}" "
         docker login -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD} ${CI_REGISTRY} &&
         docker pull ${IMAGE_NAME}:${CI_COMMIT_REF_SLUG} &&
         docker rm -f webapp || true &&
@@ -105,30 +251,37 @@ deploy_staging:
 
 test_staging:
   image: alpine:3.20
-  stage: test_staging
+  stage: Test staging
   only:
     - master
   script:
-    - apk --no-cache add curl
-    - curl -fsS "http://${HOSTNAME_DEPLOY_STAGING}" >/tmp/page.html
-    - grep -Ei "<html|<!doctype html" /tmp/page.html
+    - |
+      set -e
+      apk --no-cache add curl
+      curl -fsS "http://${HOSTNAME_DEPLOY_STAGING}" | grep -Ei "<html|<!doctype html"
 
+# -------------------------
+# DEPLOY PROD
+# -------------------------
 deploy_prod:
-  stage: deploy_prod
+  stage: Deploy prod
   only:
     - master
   environment:
     name: prod
     url: http://${HOSTNAME_DEPLOY_PROD}
   script:
-    - apk add --no-cache openssh-client
-    - mkdir -p ~/.ssh
-    - chmod 700 ~/.ssh
-    - echo "${SSH_KEY}" > ~/.ssh/id_rsa
-    - chmod 400 ~/.ssh/id_rsa
-    - ssh-keyscan -t rsa ${HOSTNAME_DEPLOY_PROD} >> ~/.ssh/known_hosts
     - |
-      ssh -t ${SSH_USER}@${HOSTNAME_DEPLOY_PROD} "
+      set -e
+      apk add --no-cache openssh-client
+
+      mkdir -p ~/.ssh
+      chmod 700 ~/.ssh
+      echo "${SSH_KEY}" > ~/.ssh/id_rsa
+      chmod 400 ~/.ssh/id_rsa
+      ssh-keyscan -t rsa "${HOSTNAME_DEPLOY_PROD}" >> ~/.ssh/known_hosts
+
+      ssh -t "${SSH_USER}@${HOSTNAME_DEPLOY_PROD}" "
         docker login -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD} ${CI_REGISTRY} &&
         docker pull ${IMAGE_NAME}:${CI_COMMIT_REF_SLUG} &&
         docker rm -f webapp || true &&
@@ -137,10 +290,11 @@ deploy_prod:
 
 test_prod:
   image: alpine:3.20
-  stage: test_prod
+  stage: Test prod
   only:
     - master
   script:
-    - apk --no-cache add curl
-    - curl -fsS "http://${HOSTNAME_DEPLOY_PROD}" >/tmp/page.html
-    - grep -Ei "<html|<!doctype html" /tmp/page.html
+    - |
+      set -e
+      apk --no-cache add curl
+      curl -fsS "http://${HOSTNAME_DEPLOY_PROD}" | grep -Ei "<html|<!doctype html"
