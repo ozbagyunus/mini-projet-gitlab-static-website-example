@@ -39,6 +39,9 @@ stages:
 # -------------------------
 docker_build:
   stage: build
+  only:
+    - master
+    - merge_requests
   script:
     - docker build -t static-website-example:ci .
     - docker save static-website-example:ci > static-website-example.tar
@@ -52,9 +55,6 @@ docker_build:
 # -------------------------
 test_acceptation:
   stage: test_acceptation
-  needs:
-    - job: docker_build
-      artifacts: true
   script:
     - |
       set -e
@@ -82,9 +82,6 @@ release_image:
   only:
     - master
     - merge_requests
-  needs:
-    - job: docker_build
-      artifacts: true
   script:
     - |
       set -e
