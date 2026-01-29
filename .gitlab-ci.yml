@@ -40,17 +40,27 @@ docker_build:
 test_acceptation:
   stage: test_acceptation
   script:
-    - docker load < static-website-example.tar
-    - docker run -d --name webapp static-website-example:ci
-    - sleep 2
-    - docker ps -a
-    - docker logs webapp || true
-    - apk --no-cache add curl
-    - CONTAINER_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' webapp)
-    - echo "Container IP: $CONTAINER_IP"
-    - curl -fsS "http://$CONTAINER_IP" >/tmp/page.html
-    - grep -Ei "<html|<!doctype html" /tmp/page.html
-    - docker rm -f webapp
+    - |
+      set -e
+
+      docker load < static-website-example.tar
+
+      docker run -d --name webapp static-website-example:ci
+      sleep 2
+
+      docker ps -a
+      docker logs webapp || true
+
+      apk --no-cache add curl
+
+      # IP du conteneur (format simple, évite les {{range ...}} complexes)
+      CONTAINER_IP="$(docker inspect webapp --format='{{.NetworkSettings.IPAddress}}')"
+      echo "Container IP: ${CONTAINER_IP}"
+
+      curl -fsS "http://${CONTAINER_IP}" > /tmp/page.html
+      grep -Ei "<html|<!doctype html" /tmp/page.html
+
+      docker rm -f webapp
 
 release_image:
   stage: release_image
